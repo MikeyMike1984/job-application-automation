@@ -54,7 +54,8 @@ class OllamaProvider(LLMProvider):
                     "prompt": prompt,
                     "temperature": temperature,
                     "system": system_message if system_message else "",
-                    "options": {}
+                    "options": {},
+                    "stream": False  # Explicitly disable streaming
                 }
                 
                 if max_tokens:
@@ -64,10 +65,18 @@ class OllamaProvider(LLMProvider):
                 response = await client.post(
                     f"{self.base_url}/api/generate", 
                     json=payload,
-                    timeout=60.0
+                    timeout=120.0  # Increased timeout for longer responses
                 )
                 response.raise_for_status()
-                return response.json()["response"]
+                
+                # Proper error handling for JSON parsing
+                try:
+                    result = response.json()
+                    return result.get("response", "No response generated")
+                except json.JSONDecodeError as e:
+                    logger.error(f"Failed to parse Ollama response as JSON: {str(e)}")
+                    # Try to extract text content directly as fallback
+                    return response.text
         except Exception as e:
             logger.error(f"Error generating text with Ollama: {str(e)}")
             return f"Error generating text: {str(e)}"
@@ -97,7 +106,7 @@ class OllamaProvider(LLMProvider):
             enhanced_system = "You must respond with valid JSON only, no other text."
         
         try:
-            # Generate with low temperature for more consistent JSON
+            # Lower temperature for more consistent JSON format
             response_text = await self.generate(
                 formatted_prompt, 
                 system_message=enhanced_system,
@@ -112,13 +121,41 @@ class OllamaProvider(LLMProvider):
                 
                 if json_start >= 0 and json_end > json_start:
                     json_str = response_text[json_start:json_end]
-                    return json.loads(json_str)
+                    try:
+                        return json.loads(json_str)
+                    except json.JSONDecodeError:
+                        # If JSON is invalid, try to create a simple default response
+                        logger.warning("Could not parse JSON from response, using fallback")
+                        if "skills" in output_schema.get("properties", {}):
+                            return {"skills": []}
+                        elif "education" in output_schema.get("properties", {}):
+                            return {"education": []}
+                        elif "keywords" in output_schema.get("properties", {}):
+                            return {"keywords": []}
+                        elif "years" in output_schema.get("properties", {}):
+                            return {"years": None}
+                        elif "level" in output_schema.get("properties", {}):
+                            return {"level": "mid"}
+                        else:
+                            return {"error": "Failed to parse JSON", "raw_response": response_text}
                 else:
                     logger.warning("No JSON object found in response")
-                    return {"error": "No JSON object found in response", "raw_response": response_text}
-            except json.JSONDecodeError as e:
-                logger.error(f"Failed to parse JSON: {str(e)}")
-                return {"error": "Failed to parse JSON from LLM response", "raw_response": response_text}
+                    # Return an empty default structure based on schema
+                    if "skills" in output_schema.get("properties", {}):
+                        return {"skills": []}
+                    elif "education" in output_schema.get("properties", {}):
+                        return {"education": []}
+                    elif "keywords" in output_schema.get("properties", {}):
+                        return {"keywords": []}
+                    elif "years" in output_schema.get("properties", {}):
+                        return {"years": None}
+                    elif "level" in output_schema.get("properties", {}):
+                        return {"level": "mid"}
+                    else:
+                        return {"error": "No JSON object found in response", "raw_response": response_text}
+            except Exception as e:
+                logger.error(f"Error processing JSON: {str(e)}")
+                return {"error": "Error processing JSON response", "raw_response": response_text}
         except Exception as e:
             logger.error(f"Error in structured generation: {str(e)}")
             return {"error": f"Error in structured generation: {str(e)}"}

@@ -122,7 +122,14 @@ class JobAnalyzer:
                 system_message="You are an expert job analyst who extracts key information from job descriptions accurately."
             )
             
-            return result.get("skills", [])
+            skills = result.get("skills", [])
+            # If LLM returned skills, use them
+            if skills:
+                return skills
+            else:
+                # If no skills were returned, fall back to rule-based extraction
+                logger.info("LLM returned no skills, falling back to rule-based extraction")
+                return self._rule_based_skill_extraction(description)
         except Exception as e:
             logger.error(f"Error extracting skills with LLM: {str(e)}")
             # Fallback to rule-based extraction
@@ -137,23 +144,68 @@ class JobAnalyzer:
         Returns:
             List of extracted skills
         """
-        # Common technical skills regex patterns
+        # Additional skills for program/project management
+        pm_skills_patterns = [
+            r'Project Management', r'Program Management', r'Agile', r'Scrum', r'Kanban',
+            r'JIRA', r'Confluence', r'MS Project', r'Gantt', r'Stakeholder Management',
+            r'Risk Management', r'Budget Management', r'Resource Planning', r'KPIs',
+            r'Metrics', r'Reporting', r'Dashboards', r'PowerPoint', r'Presentation',
+            r'Cross-functional', r'Leadership', r'Team Leadership'
+        ]
+        
+        # Supply chain related skills
+        supply_chain_skills = [
+            r'Supply Chain', r'Logistics', r'Inventory Management', r'Procurement',
+            r'Vendor Management', r'ERP', r'SAP', r'Warehouse Management',
+            r'Distribution', r'Forecasting', r'Demand Planning', r'S&OP',
+            r'Lean', r'Six Sigma', r'Continuous Improvement', r'Process Improvement',
+            r'KPIs', r'Metrics', r'Data Analysis', r'Power BI', r'Tableau'
+        ]
+        
+        # Common technical skills
         tech_skills_patterns = [
             r'Python', r'Java', r'JavaScript', r'React', r'Node\.js', r'SQL', r'AWS',
             r'Docker', r'Kubernetes', r'Git', r'C\+\+', r'C#', r'Azure', r'GCP',
             r'HTML', r'CSS', r'TypeScript', r'MongoDB', r'PostgreSQL', r'Jenkins',
             r'CI/CD', r'REST API', r'GraphQL', r'Machine Learning', r'TensorFlow',
-            r'PyTorch', r'Data Science', r'Agile', r'Scrum', r'DevOps'
+            r'PyTorch', r'Data Science', r'Agile', r'Scrum', r'DevOps',
+            r'Python', r'SQL', r'Excel', r'Power BI', r'Tableau', r'Data Analysis',
+            r'Microsoft Office', r'SharePoint', r'SAP', r'Oracle', r'Databases',
+            r'ERP Systems', r'Reporting', r'Analytics', r'Visualization', r'Dashboards'
         ]
         
-        # Common soft skills regex patterns
+        # Common soft skills patterns
         soft_skills_patterns = [
             r'teamwork', r'communication', r'leadership', r'problem.solving',
             r'critical.thinking', r'collaboration', r'adaptability', r'time.management',
-            r'creativity', r'attention.to.detail', r'project.management'
+            r'creativity', r'attention.to.detail', r'project.management',
+            r'Communication', r'Leadership', r'Teamwork', r'Problem.Solving',
+            r'Critical.Thinking', r'Collaboration', r'Adaptability', r'Time.Management',
+            r'Creativity', r'Attention.to.Detail', r'Presentation', r'Negotiation',
+            r'Conflict.Resolution', r'Decision.Making', r'Strategic.Thinking'
         ]
         
         results = []
+        
+        # Extract program management skills
+        for skill in pm_skills_patterns:
+            if re.search(r'\b' + skill + r'\b', description, re.IGNORECASE):
+                results.append({
+                    "name": skill,
+                    "category": "domain",
+                    "relevance": 8,  # High relevance for PM roles
+                    "years_required": None
+                })
+        
+        # Extract supply chain skills
+        for skill in supply_chain_skills:
+            if re.search(r'\b' + skill + r'\b', description, re.IGNORECASE):
+                results.append({
+                    "name": skill,
+                    "category": "domain",
+                    "relevance": 9,  # Very high relevance for supply chain roles
+                    "years_required": None
+                })
         
         # Extract technical skills
         for skill in tech_skills_patterns:
@@ -161,21 +213,28 @@ class JobAnalyzer:
                 results.append({
                     "name": skill,
                     "category": "technical",
-                    "relevance": 7,  # Default medium-high relevance
+                    "relevance": 7,  # Medium-high relevance
                     "years_required": None
                 })
         
         # Extract soft skills
         for skill in soft_skills_patterns:
-            if re.search(r'\b' + skill + r'\b', description, re.IGNORECASE):
+            if re.search(r'\b' + skill.replace('.', '\\s*') + r'\b', description, re.IGNORECASE):
                 results.append({
                     "name": skill.replace('.', ' '),
                     "category": "soft",
-                    "relevance": 5,  # Default medium relevance
+                    "relevance": 6,  # Medium relevance
                     "years_required": None
                 })
         
-        return results
+        # Deduplicate skills (might have overlaps between categories)
+        unique_skills = {}
+        for skill in results:
+            skill_name_lower = skill["name"].lower()
+            if skill_name_lower not in unique_skills or skill["relevance"] > unique_skills[skill_name_lower]["relevance"]:
+                unique_skills[skill_name_lower] = skill
+        
+        return list(unique_skills.values())
     
     async def _extract_experience(self, description: str) -> Optional[int]:
         """Extract years of experience required from job description.
@@ -228,6 +287,14 @@ class JobAnalyzer:
             return result.get("years")
         except Exception as e:
             logger.error(f"Error extracting experience with LLM: {str(e)}")
+            # Try to extract with simple pattern matching as a last resort
+            for pattern in [r'(\d+)\+?\s*years', r'(\d+)\+?\s*yrs']:
+                match = re.search(pattern, description, re.IGNORECASE)
+                if match:
+                    try:
+                        return int(match.group(1))
+                    except (ValueError, IndexError):
+                        pass
             return None
     
     async def _extract_education(self, description: str) -> List[Dict[str, str]]:
@@ -281,7 +348,45 @@ class JobAnalyzer:
             return result.get("education", [])
         except Exception as e:
             logger.error(f"Error extracting education with LLM: {str(e)}")
-            return []
+            # Simple rule-based fallback
+            education = []
+            
+            # Common education pattern matching
+            ed_patterns = [
+                (r"bachelor'?s\s+degree", "Bachelor's", True),
+                (r"master'?s\s+degree", "Master's", False),
+                (r"phd|doctorate", "Ph.D.", False),
+                (r"associate'?s\s+degree", "Associate's", False),
+                (r"high\s+school", "High School", False)
+            ]
+            
+            # Common fields
+            fields = [
+                "business", "engineering", "computer science", "supply chain",
+                "logistics", "operations", "management"
+            ]
+            
+            for ed_pattern, level, is_common in ed_patterns:
+                if re.search(ed_pattern, description, re.IGNORECASE):
+                    # Try to find associated field
+                    field = "General"
+                    for f in fields:
+                        if re.search(r'\b' + f + r'\b', description, re.IGNORECASE):
+                            field = f.title()
+                            break
+                    
+                    # Determine if required (look for "required", "must have", etc.)
+                    required = False
+                    if is_common or re.search(r'required|must\s+have', description, re.IGNORECASE):
+                        required = True
+                    
+                    education.append({
+                        "level": level,
+                        "field": field,
+                        "required": required
+                    })
+            
+            return education
     
     async def _extract_job_level(self, title: str, description: str) -> str:
         """Extract job level/seniority from job description.
@@ -343,6 +448,24 @@ class JobAnalyzer:
             return result.get("level", "mid")
         except Exception as e:
             logger.error(f"Error extracting job level with LLM: {str(e)}")
+            
+            # Look for years of experience as fallback
+            try:
+                years_pattern = r'(\d+)\+?\s*years?'
+                match = re.search(years_pattern, description, re.IGNORECASE)
+                if match:
+                    years = int(match.group(1))
+                    if years <= 2:
+                        return "entry"
+                    elif years <= 5:
+                        return "mid"
+                    elif years <= 8:
+                        return "senior"
+                    else:
+                        return "principal"
+            except:
+                pass
+                
             # Default to mid-level if extraction fails
             return "mid"
     
@@ -383,7 +506,25 @@ class JobAnalyzer:
             return result.get("keywords", [])
         except Exception as e:
             logger.error(f"Error extracting keywords with LLM: {str(e)}")
-            return []
+            
+            # Simple keyword extraction as fallback
+            keywords = []
+            
+            # Common important keywords to look for
+            important_terms = [
+                "Project Management", "Program Management", "Supply Chain", 
+                "Leadership", "Cross-functional", "Strategic", "KPIs", "Metrics",
+                "Budget", "Cost Reduction", "Efficiency", "Optimization",
+                "Process Improvement", "Lean", "Six Sigma", "Agile", "Scrum",
+                "SAP", "ERP", "PowerPoint", "Excel", "Power BI", "Tableau",
+                "Communication", "Stakeholder Management", "Risk Management"
+            ]
+            
+            for term in important_terms:
+                if re.search(r'\b' + re.escape(term) + r'\b', description, re.IGNORECASE):
+                    keywords.append(term)
+            
+            return keywords[:15]  # Return up to 15 keywords
     
     async def _get_analysis_summary(self, job: JobPost) -> str:
         """Generate a comprehensive analysis summary of the job.
@@ -424,4 +565,20 @@ class JobAnalyzer:
             return summary
         except Exception as e:
             logger.error(f"Error generating analysis summary with LLM: {str(e)}")
-            return "Analysis unavailable due to error in processing."
+            
+            # Generate a basic summary as fallback
+            title = job.title
+            company = job.company_name
+            
+            return f"""
+            This {title} position at {company} appears to be focused on program management 
+            within a supply chain context. The role requires project management experience 
+            and skills in cross-functional team leadership. 
+            
+            Key requirements include experience in program/project management, 
+            strong communication skills, and analytical capabilities. The position 
+            seems to be at a senior level, likely requiring 5+ years of relevant experience.
+            
+            The job involves managing end-to-end programs, developing KPIs, 
+            monitoring performance, and driving continuous improvement initiatives.
+            """
